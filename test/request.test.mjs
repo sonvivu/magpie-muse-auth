@@ -3,7 +3,7 @@
 // passes back untouched. Network is fully mocked. Run: node --test test/
 import test from "node:test"
 import assert from "node:assert/strict"
-import { MuseAuthPlugin, normalizeRequest, stripReasoningEncryptedContent, parseReferencedReasoningId, dropBareReasoningItems, dropAllReasoningItems, parseSubscriptionUsage, subscriptionWindows, subscriptionUsageStream, ensureMuseToolNamespace } from "../index.mjs"
+import { MuseAuthPlugin, normalizeRequest, stripReasoningEncryptedContent, parseReferencedReasoningId, dropBareReasoningItems, dropAllReasoningItems, parseSubscriptionUsage, subscriptionWindows, subscriptionUsageStream, ensureMuseToolNamespace, sanitizeWebSearchTools } from "../index.mjs"
 
 test("normalizeRequest: adds missing instructions, drops refused fields", () => {
   const out = normalizeRequest({
@@ -947,6 +947,66 @@ test("signedFetch: a tool-bearing request gains the muse namespace before Meta s
     assert.equal(sent.tools[0].name, "read_file")
     assert.equal(sent.tools[1].type, "namespace")
     assert.equal(sent.tools[1].name, "muse")
+  } finally {
+    globalThis.fetch = realFetch
+  }
+})
+
+test("sanitizeWebSearchTools: drops search_content_types from web_search, top-level and nested", () => {
+  const out = sanitizeWebSearchTools({ tools: [
+    { type: "web_search", search_content_types: ["text"], other: 1 },
+    { type: "function", name: "read_file" },
+    { type: "namespace", name: "muse", tools: [{ type: "web_search", search_content_types: ["text"] }] },
+  ] })
+  assert.equal("search_content_types" in out.tools[0], false)
+  assert.equal(out.tools[0].other, 1)
+  assert.equal(out.tools[1].name, "read_file")
+  assert.equal("search_content_types" in out.tools[2].tools[0], false)
+  assert.deepEqual(sanitizeWebSearchTools({ tools: [{ type: "web_search" }] }), { tools: [{ type: "web_search" }] })
+  assert.deepEqual(sanitizeWebSearchTools({ model: "muse-spark-1.3" }), { model: "muse-spark-1.3" })
+  assert.equal(sanitizeWebSearchTools(null), null)
+})
+
+test("signedFetch: every request carries fresh Muse session headers", async () => {
+  const hooks = await MuseAuthPlugin({ client: stubClient })
+  const realFetch = globalThis.fetch
+  const seen = []
+  globalThis.fetch = async (url, init) => {
+    seen.push({
+      session: init.headers.get("X-Tbh-Session-Id"),
+      gateway: init.headers.get("X-Meta-Ai-Gateway-Session-Id"),
+      thread: init.headers.get("X-Tbh-Thread-Id"),
+      root: init.headers.get("X-Tbh-Root-Session-Id"),
+      role: init.headers.get("X-Tbh-Agent-Role"),
+      ua: init.headers.get("User-Agent"),
+      client: init.headers.get("X-Client-Id"),
+    })
+    return new Response(JSON.stringify({ id: "resp_1", status: "completed", output: [], usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 } }), { status: 200, headers: { "Content-Type": "application/json" } })
+  }
+  try {
+    const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+    const loader = await hooks.auth.loader(async () => fakeSignIn())
+    for (let i = 0; i < 2; i++) {
+      const res = await loader.fetch("https://api.meta.ai/v1/responses", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ model: "muse-spark-1.3", input: "hi" }),
+      })
+      assert.equal(res.status, 200)
+      await res.text()
+    }
+    assert.equal(seen.length, 2)
+    for (const h of seen) {
+      assert.match(h.session, uuid)
+      assert.equal(h.gateway, h.session)
+      assert.equal(h.thread, h.session)
+      assert.equal(h.root, h.session)
+      assert.equal(h.role, "main")
+      assert.match(h.ua, /^muse-build\/1\.4\.14/)
+      assert.equal(h.client, "tbh:exec")
+    }
+    // A fresh session id per request, never reused across calls.
+    assert.notEqual(seen[0].session, seen[1].session)
   } finally {
     globalThis.fetch = realFetch
   }

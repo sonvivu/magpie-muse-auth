@@ -269,12 +269,47 @@ export function ensureMuseToolNamespace(body) {
   return { ...body, tools: [...tools, namespace] }
 }
 
+// sanitizeWebSearchTools drops `search_content_types` from `web_search`
+// tools (top-level and inside a namespace tool): Meta's Responses API
+// rejects that field — it is an OpenAI-side option — so a client that
+// sends it gets a 400. Same as CLIProxyAPI's SanitizeMetaWebSearchToolsDoc.
+export function sanitizeWebSearchTools(body) {
+  if (body === null || typeof body !== "object" || Array.isArray(body)) return body
+  if (!Array.isArray(body.tools)) return body
+  let changed = false
+  const tools = body.tools.map((tool) => {
+    if (tool === null || typeof tool !== "object" || Array.isArray(tool)) return tool
+    if (tool.type === "web_search" && "search_content_types" in tool) {
+      changed = true
+      const { search_content_types: _dropped, ...rest } = tool
+      return rest
+    }
+    if (tool.type === "namespace" && Array.isArray(tool.tools)) {
+      let subChanged = false
+      const subtools = tool.tools.map((sub) => {
+        if (sub !== null && typeof sub === "object" && !Array.isArray(sub) && sub.type === "web_search" && "search_content_types" in sub) {
+          subChanged = true
+          const { search_content_types: _dropped, ...rest } = sub
+          return rest
+        }
+        return sub
+      })
+      if (subChanged) {
+        changed = true
+        return { ...tool, tools: subtools }
+      }
+    }
+    return tool
+  })
+  return changed ? { ...body, tools } : body
+}
+
 export function normalizeRequest(body) {
   if (body === null || typeof body !== "object" || Array.isArray(body)) return body
   const out = { ...body }
   for (const f of DROP_FIELDS) delete out[f]
   if (!("instructions" in out) || out.instructions == null) out.instructions = ""
-  return ensureMuseToolNamespace(out)
+  return ensureMuseToolNamespace(sanitizeWebSearchTools(out))
 }
 
 // parseSubscriptionUsage validates and normalizes one `subscription`
@@ -427,6 +462,15 @@ export async function MuseAuthPlugin({ client }) {
       headers.set("Authorization", "Bearer " + current.access)
       headers.set("User-Agent", BUILD_USER_AGENT)
       headers.set("X-Client-Id", CLIENT_HEADER)
+      // A fresh session id per request, as Muse Code sends: the gateway
+      // must not reuse one Muse session across unrelated clients. (Same
+      // set CLIProxyAPI stamps in applyMetaClientIdentity.)
+      const sessionId = crypto.randomUUID()
+      headers.set("X-Tbh-Session-Id", sessionId)
+      headers.set("X-Meta-Ai-Gateway-Session-Id", sessionId)
+      headers.set("X-Tbh-Thread-Id", sessionId)
+      headers.set("X-Tbh-Root-Session-Id", sessionId)
+      headers.set("X-Tbh-Agent-Role", "main")
       headers.set("Content-Type", "application/json")
       headers.set("Accept", "text/event-stream")
       return fetch(API_BASE + "/responses", {
