@@ -3,7 +3,7 @@
 // passes back untouched. Network is fully mocked. Run: node --test test/
 import test from "node:test"
 import assert from "node:assert/strict"
-import { MuseAuthPlugin, normalizeRequest, stripReasoningEncryptedContent, parseReferencedReasoningId, dropBareReasoningItems, dropAllReasoningItems, parseSubscriptionUsage, subscriptionWindows, subscriptionUsageStream } from "../index.mjs"
+import { MuseAuthPlugin, normalizeRequest, stripReasoningEncryptedContent, parseReferencedReasoningId, dropBareReasoningItems, dropAllReasoningItems, parseSubscriptionUsage, subscriptionWindows, subscriptionUsageStream, ensureMuseToolNamespace } from "../index.mjs"
 
 test("normalizeRequest: adds missing instructions, drops refused fields", () => {
   const out = normalizeRequest({
@@ -904,4 +904,50 @@ test("signedFetch: usage hook reports no windows before any request", async () =
   assert.equal(u.plan, "Pro")
   assert.equal(u.user, "A B")
   assert.equal("windows" in u, false)
+})
+
+test("ensureMuseToolNamespace: appends the muse namespace, keeps caller tools, skips the rest", () => {
+  const withTools = ensureMuseToolNamespace({ model: "muse-spark-1.3", tools: [{ type: "function", name: "read_file", description: "Read a file.", parameters: { type: "object", properties: {} }, strict: true }] })
+  assert.equal(withTools.tools.length, 2)
+  assert.equal(withTools.tools[0].name, "read_file")
+  assert.equal(withTools.tools[1].type, "namespace")
+  assert.equal(withTools.tools[1].name, "muse")
+  assert.equal(withTools.tools[1].description, "Muse Code tool set.")
+  assert.equal(withTools.tools[1].tools[0].name, "submit_reminder_decision")
+  assert.deepEqual(ensureMuseToolNamespace({ model: "muse-spark-1.3" }), { model: "muse-spark-1.3" })
+  assert.deepEqual(ensureMuseToolNamespace({ model: "muse-spark-1.3", tools: [] }), { model: "muse-spark-1.3", tools: [] })
+  const already = { tools: [{ type: "namespace", name: "muse", tools: [] }] }
+  assert.equal(ensureMuseToolNamespace(already).tools.length, 1)
+  assert.equal(ensureMuseToolNamespace(null), null)
+})
+
+test("signedFetch: a tool-bearing request gains the muse namespace before Meta sees it", async () => {
+  const hooks = await MuseAuthPlugin({ client: stubClient })
+  const realFetch = globalThis.fetch
+  let sentBody
+  globalThis.fetch = async (url, init) => {
+    sentBody = init.body
+    return new Response(JSON.stringify({ id: "resp_1", status: "completed", output: [], usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 } }), { status: 200, headers: { "Content-Type": "application/json" } })
+  }
+  try {
+    const loader = await hooks.auth.loader(async () => fakeSignIn())
+    const res = await loader.fetch("https://api.meta.ai/v1/responses", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        model: "muse-spark-1.3",
+        input: "hi",
+        tools: [{ type: "function", name: "read_file", description: "Read a file.", parameters: { type: "object", properties: {}, required: [] }, strict: true }],
+      }),
+    })
+    assert.equal(res.status, 200)
+    await res.text()
+    const sent = JSON.parse(sentBody)
+    assert.equal(sent.tools.length, 2)
+    assert.equal(sent.tools[0].name, "read_file")
+    assert.equal(sent.tools[1].type, "namespace")
+    assert.equal(sent.tools[1].name, "muse")
+  } finally {
+    globalThis.fetch = realFetch
+  }
 })

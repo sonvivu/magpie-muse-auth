@@ -245,12 +245,36 @@ function isEncryptedContentCallerError(status, text) {
 // the body to send. (1) Drop the fields above. (2) Ensure `instructions`
 // exists: CLIProxyAPI's normalizeCodexInstructions sets it to "" when
 // absent, and the gateway only sends it when there is a system prompt.
+// The canonical Muse namespace tool, captured from the Muse Code 1.4.12
+// reminder agent (the same blob CLIProxyAPI appends). Subscription-key
+// tool requests can require it even with current client headers: Meta
+// treats a tool-bearing request without it as not from Muse Code, and
+// answers "Muse Code subscriptions cover requests from the Muse Code
+// client only". The real CLI always carries it in its own tool-bearing
+// requests, so a client that sends its own tools (a VS Code agent over
+// Chat Completions) needs the plugin to append it.
+const MUSE_NAMESPACE_JSON = `{"type":"namespace","name":"muse","description":"Muse Code tool set.","tools":[{"type":"function","name":"submit_reminder_decision","description":"Submit this reminder child's explicit decision.","parameters":{"additionalProperties":false,"properties":{"advisory_text":{"description":"Short text to deliver to the main agent when reminding.","type":["null","string"]},"confidence":{"description":"Confidence in the decision.","enum":["low","medium","high"],"type":["null","string"]},"decision":{"enum":["remind","none"],"type":"string"},"priority":{"description":"Requested reminder priority.","enum":["low","normal","high"],"type":["null","string"]},"reason":{"description":"Brief reason for reminding or staying silent.","type":"string"},"skill_id":{"description":"The listed skill id to remind when needs_reminder is true.","type":["null","string"]},"visible_for_steps":{"description":"Requested ephemeral visibility length in main model steps.","maximum":8,"minimum":1,"type":["null","integer"]}},"required":["advisory_text","confidence","decision","priority","reason","skill_id","visible_for_steps"],"type":"object"},"strict":true}]}`
+
+// ensureMuseToolNamespace appends the canonical `muse` namespace tool to
+// a tool-bearing Responses request that lacks one, preserving the caller's
+// tools (their names and schemas stay untouched). Tool-less requests and
+// requests that already carry the namespace are returned unchanged.
+export function ensureMuseToolNamespace(body) {
+  if (body === null || typeof body !== "object" || Array.isArray(body)) return body
+  const tools = body.tools
+  if (!Array.isArray(tools) || tools.length === 0) return body
+  if (tools.some((t) => t !== null && typeof t === "object" && !Array.isArray(t) && t.type === "namespace" && t.name === "muse")) return body
+  let namespace
+  try { namespace = JSON.parse(MUSE_NAMESPACE_JSON) } catch { return body }
+  return { ...body, tools: [...tools, namespace] }
+}
+
 export function normalizeRequest(body) {
   if (body === null || typeof body !== "object" || Array.isArray(body)) return body
   const out = { ...body }
   for (const f of DROP_FIELDS) delete out[f]
   if (!("instructions" in out) || out.instructions == null) out.instructions = ""
-  return out
+  return ensureMuseToolNamespace(out)
 }
 
 // parseSubscriptionUsage validates and normalizes one `subscription`
