@@ -3,7 +3,7 @@
 // passes back untouched. Network is fully mocked. Run: node --test test/
 import test from "node:test"
 import assert from "node:assert/strict"
-import { MuseAuthPlugin, normalizeRequest, stripReasoningEncryptedContent, parseReferencedReasoningId, dropBareReasoningItems, dropAllReasoningItems, parseSubscriptionUsage, subscriptionWindows, subscriptionUsageStream, ensureMuseToolNamespace, sanitizeWebSearchTools } from "../index.mjs"
+import { MuseAuthPlugin, normalizeRequest, stripReasoningEncryptedContent, parseReferencedReasoningId, dropBareReasoningItems, dropAllReasoningItems, parseSubscriptionUsage, subscriptionWindows, subscriptionUsageStream, ensureMuseToolNamespace, sanitizeWebSearchTools, dropCustomTools } from "../index.mjs"
 
 test("normalizeRequest: adds missing instructions, drops refused fields", () => {
   const out = normalizeRequest({
@@ -1007,6 +1007,55 @@ test("signedFetch: every request carries fresh Muse session headers", async () =
     }
     // A fresh session id per request, never reused across calls.
     assert.notEqual(seen[0].session, seen[1].session)
+  } finally {
+    globalThis.fetch = realFetch
+  }
+})
+
+test("dropCustomTools: removes custom tools, keeps the rest", () => {
+  const out = dropCustomTools({ tools: [
+    { type: "function", name: "read_file" },
+    { type: "custom", name: "run_raw", format: { type: "text" } },
+    { type: "web_search" },
+  ] })
+  assert.equal(out.tools.length, 2)
+  assert.equal(out.tools[0].name, "read_file")
+  assert.equal(out.tools[1].type, "web_search")
+  assert.deepEqual(dropCustomTools({ tools: [{ type: "function", name: "read_file" }] }), { tools: [{ type: "function", name: "read_file" }] })
+  assert.deepEqual(dropCustomTools({ model: "muse-spark-1.3" }), { model: "muse-spark-1.3" })
+  assert.equal(dropCustomTools(null), null)
+})
+
+test("signedFetch: a custom tool is dropped before Meta sees it", async () => {
+  const hooks = await MuseAuthPlugin({ client: stubClient })
+  const realFetch = globalThis.fetch
+  let sentBody
+  globalThis.fetch = async (url, init) => {
+    sentBody = init.body
+    return new Response(JSON.stringify({ id: "resp_1", status: "completed", output: [], usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 } }), { status: 200, headers: { "Content-Type": "application/json" } })
+  }
+  try {
+    const loader = await hooks.auth.loader(async () => fakeSignIn())
+    const res = await loader.fetch("https://api.meta.ai/v1/responses", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        model: "muse-spark-1.3",
+        input: "hi",
+        tools: [
+          { type: "function", name: "read_file", description: "Read a file.", parameters: { type: "object", properties: {}, required: [] }, strict: true },
+          { type: "custom", name: "run_raw", description: "Run raw text.", format: { type: "text" } },
+        ],
+      }),
+    })
+    assert.equal(res.status, 200)
+    await res.text()
+    const sent = JSON.parse(sentBody)
+    // The custom tool is gone; the function tool stays, plus the muse
+    // namespace the plugin appends for tool-bearing requests.
+    assert.equal(sent.tools.some((t) => t.type === "custom"), false)
+    assert.equal(sent.tools.some((t) => t.name === "read_file"), true)
+    assert.equal(sent.tools.some((t) => t.type === "namespace" && t.name === "muse"), true)
   } finally {
     globalThis.fetch = realFetch
   }

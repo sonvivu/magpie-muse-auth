@@ -304,12 +304,29 @@ export function sanitizeWebSearchTools(body) {
   return changed ? { ...body, tools } : body
 }
 
+// dropCustomTools removes `custom` tools from a Responses request: Meta's
+// endpoint does not support them and answers "`custom` tools are not
+// supported on this endpoint" (HTTP 400, param `tools`). A `custom` tool
+// is an OpenAI-side tool whose call the model writes as free text instead
+// of structured JSON; there is no faithful conversion to a `function`
+// tool (the client expects a `custom_tool_call` back), so the tool is
+// dropped and the request proceeds with the tools Meta does support.
+// CLIProxyAPI has no handling for this — its Meta executor passes
+// `custom` tools through and fails the same way.
+export function dropCustomTools(body) {
+  if (body === null || typeof body !== "object" || Array.isArray(body)) return body
+  if (!Array.isArray(body.tools)) return body
+  const tools = body.tools.filter((t) => !(t !== null && typeof t === "object" && !Array.isArray(t) && t.type === "custom"))
+  if (tools.length === body.tools.length) return body
+  return { ...body, tools }
+}
+
 export function normalizeRequest(body) {
   if (body === null || typeof body !== "object" || Array.isArray(body)) return body
   const out = { ...body }
   for (const f of DROP_FIELDS) delete out[f]
   if (!("instructions" in out) || out.instructions == null) out.instructions = ""
-  return ensureMuseToolNamespace(sanitizeWebSearchTools(out))
+  return ensureMuseToolNamespace(sanitizeWebSearchTools(dropCustomTools(out)))
 }
 
 // parseSubscriptionUsage validates and normalizes one `subscription`
